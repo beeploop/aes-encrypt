@@ -3,119 +3,202 @@ package cli
 import (
 	"bufio"
 	"bytes"
-	"flag"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/beeploop/aes-encrypt/encrypt"
 )
 
-type CLI struct{}
+type MODE string
 
-func NewCLI() *CLI {
-	return &CLI{}
+const (
+	ENCRYPT MODE = "encrypt"
+	DECRYPT MODE = "decrypt"
+
+	KEY_LEN          int = 32
+	DEFAULT_FILENAME     = "output"
+)
+
+type cli struct {
+	inputFile  string
+	key        []byte
+	mode       MODE
+	outputFile string
+	wd         string
 }
 
-func (c *CLI) Start() {
-	key := flag.String("key", "", "32 character AES key. You can pass in a txt file")
-	file := flag.String("file", "", "Input file")
-	mode := flag.String("mode", "encrypt", "operation mode encrypt/decrypt")
-	output := flag.String("output", "output", "Output file")
-
-	flag.Parse()
-	if *file == "" || *key == "" {
-		fmt.Println("Invalid usage")
-		flag.PrintDefaults()
-		os.Exit(1)
-	}
-
-	inputFile := c.readInputFile(*file)
-	crypto := c.InitEncryptor(key)
-
-	var outputSource []byte
-	switch *mode {
-	case "encrypt":
-		if encrypted, err := crypto.Encrypt(inputFile); err != nil {
-			panic(err)
-		} else {
-			outputSource = encrypted
-		}
-	case "decrypt":
-		if decrypted, err := crypto.Decrypt(inputFile); err != nil {
-			panic(err)
-		} else {
-			outputSource = decrypted
-		}
-	default:
-		panic("unsupported mode")
-	}
-
-	ext := filepath.Ext(*file)
-	basename := strings.Split(*output, ".")[0]
-	outputFile := basename + ext
-	c.saveFile(outputSource, outputFile)
-
-	fmt.Println("done...")
-}
-
-func (c *CLI) InitEncryptor(key *string) *encrypt.Encrypt {
+func New() (*cli, error) {
 	wd, err := os.Getwd()
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 
-	var encryptionKey []byte
-	ext := filepath.Ext(*key)
+	cli := &cli{
+		mode:       ENCRYPT,
+		outputFile: filepath.Join(wd, DEFAULT_FILENAME), // File extension automatically placed on save
+		wd:         wd,
+	}
+
+	return cli, nil
+}
+
+func (c *cli) SetKey(keySource string) error {
+	ext := filepath.Ext(keySource)
+
 	if ext == ".txt" {
-		key, err := os.ReadFile(filepath.Join(wd, *key))
-		if err != nil {
-			panic(err)
-		}
+		if key, err := c.readContent(keySource); err != nil {
+			return err
+		} else {
+			if len(key) != KEY_LEN {
+				return errors.New("Invalid key. Key must be 32 character string for AES256")
+			}
 
-		scanner := bufio.NewReader(bytes.NewReader(key))
-		line, _, err := scanner.ReadLine()
-		if err != nil {
-			panic(err)
+			c.key = key
+			return nil
 		}
-
-		encryptionKey = []byte(line)
-	} else {
-		encryptionKey = []byte(*key)
 	}
 
-	crypto, err := encrypt.New(encryptionKey)
-	if err != nil {
-		panic(err)
+	key := []byte(keySource)
+	if len(key) != KEY_LEN {
+		return errors.New("Invalid key. Key must be 32 character string for AES256")
 	}
 
-	return crypto
+	c.key = key
+	return nil
 }
 
-func (c *CLI) readInputFile(src string) []byte {
-	wd, err := os.Getwd()
-	if err != nil {
-		panic(err)
-	}
-
-	path := filepath.Join(wd, src)
-	source, err := os.ReadFile(path)
-	if err != nil {
-		panic(err)
-	}
-
-	return source
+func (c *cli) SetMode(mode MODE) {
+	c.mode = mode
 }
 
-func (c *CLI) saveFile(src []byte, output string) {
-	wd, err := os.Getwd()
-	if err != nil {
-		panic(err)
+func (c *cli) SetInputFile(inputFile string) error {
+	if inputFile == "" {
+		return errors.New("empty file")
 	}
 
-	outputPath := filepath.Join(wd, output)
-	if err := os.WriteFile(outputPath, src, 0666); err != nil {
-		panic(err)
+	path, err := filepath.Abs(inputFile)
+	if err != nil {
+		return err
 	}
+
+	c.inputFile = path
+	return nil
+}
+
+func (c *cli) SetOutput(out string) error {
+	if out == "." {
+		c.outputFile = filepath.Join(c.wd, DEFAULT_FILENAME)
+		return nil
+	}
+
+	if out == "" {
+		fmt.Println("Empty output location, saving to default location")
+		return nil
+	}
+
+	abs, err := filepath.Abs(out)
+	if err != nil {
+		return err
+	}
+
+	c.outputFile = abs
+	return nil
+}
+
+func (c *cli) Run() error {
+	switch c.mode {
+	case ENCRYPT:
+		encrypted, err := c.encrypt()
+		if err != nil {
+			return err
+		}
+
+		return c.saveFile(encrypted)
+
+	case DECRYPT:
+		decrypted, err := c.decrypt()
+		if err != nil {
+			return err
+		}
+
+		return c.saveFile(decrypted)
+
+	default:
+		return errors.New("Unsupported mode")
+	}
+}
+
+func (c *cli) encrypt() ([]byte, error) {
+	input, err := c.readFile()
+	if err != nil {
+		return nil, err
+	}
+
+	encryptor, err := encrypt.New(c.key)
+	if err != nil {
+		return nil, err
+	}
+
+	encrypted, err := encryptor.Encrypt(input)
+	if err != nil {
+		return nil, err
+	}
+
+	return encrypted, nil
+}
+
+func (c *cli) decrypt() ([]byte, error) {
+	input, err := c.readFile()
+	if err != nil {
+		return nil, err
+	}
+
+	decryptor, err := encrypt.New(c.key)
+	if err != nil {
+		return nil, err
+	}
+
+	decrypted, err := decryptor.Decrypt(input)
+	if err != nil {
+		return nil, err
+	}
+
+	return decrypted, nil
+}
+
+func (c *cli) saveFile(data []byte) error {
+	ext := filepath.Ext(c.inputFile)
+	file := c.outputFile + ext
+
+	if err := os.WriteFile(file, data, 0777); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *cli) readFile() ([]byte, error) {
+	b, err := os.ReadFile(c.inputFile)
+	if err != nil {
+		return nil, err
+	}
+
+	return b, nil
+}
+
+func (c *cli) readContent(source string) ([]byte, error) {
+	key, err := os.ReadFile(filepath.Join(c.wd, source))
+	if err != nil {
+		return nil, err
+	}
+
+	scanner := bufio.NewReader(bytes.NewReader(key))
+	line, _, err := scanner.ReadLine()
+	if err != nil {
+		return nil, err
+	}
+
+	return []byte(line), nil
 }

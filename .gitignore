@@ -2,3 +2,6 @@
 test/
 bin/
 *.txt
+*.png
+*.jpeg
+*.jpg
